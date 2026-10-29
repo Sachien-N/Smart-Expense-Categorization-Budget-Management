@@ -35,9 +35,14 @@ class Expense(Base):
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), index=True, nullable=False)
     # source: "manual" (user typed it) or "integration" (synced over HTTP from B/C)
     source: Mapped[str] = mapped_column(String(20), default="manual", nullable=False)
-    # Stable external identifier for idempotent integration imports,
-    # e.g. "B:B-SUB-3:2026-10" or "C:actual:2026-09". Unique when present.
+    # Stable external identifier for idempotent integration imports. Unique
+    # when present. Formats: "B:<external_ref>:<YYYY-MM>" (one row per
+    # subscription per month) and "C:<YYYY-MM>" (one row per electricity month).
     external_id: Mapped[str | None] = mapped_column(String(120), unique=True, index=True, nullable=True)
+    # For imported rows: how the amount was derived - "monthly_normalized"
+    # (B), "actual" or "estimated" (C). NULL for manual expenses.
+    # Added after v1.0; existing databases get it via add_missing_columns().
+    import_basis: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -47,6 +52,21 @@ class Expense(Base):
     def category(self) -> str:
         """Category NAME (the JSON contract exposes the string, not the FK)."""
         return self.category_ref.name if self.category_ref is not None else ""
+
+    @property
+    def origin(self) -> str:
+        """Where the row came from: manual | subscription_tracker | smart_home_energy."""
+        return origin_of(self.source, self.external_id)
+
+
+def origin_of(source: str, external_id: str | None) -> str:
+    if source != "integration" or not external_id:
+        return "manual"
+    if external_id.startswith("B:"):
+        return "subscription_tracker"
+    if external_id.startswith("C:"):
+        return "smart_home_energy"
+    return "integration"
 
 
 class Budget(Base):

@@ -53,7 +53,7 @@ Status legend: `[x]` done with evidence - `[!]` done but flagged / unverified -
 ## Quality assurance
 
 - [x] 23 pytest tests pass (unit + integration-mocked) - `tests/`
-      (`python -m pytest -q` -> `23 passed`)
+      (`python -m pytest -q` -> `43 passed`)
 - [x] Validation tests: non-positive amount 422, bad month format 422, unknown ids 404, duplicate budget 409
 - [x] Categorizer tests: Netflix -> Subscriptions, Swiggy -> Food, fallback -> Uncategorized
 - [x] Integration tests: peers-down graceful, invalid-response flagged,

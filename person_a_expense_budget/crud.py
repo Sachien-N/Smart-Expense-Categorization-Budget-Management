@@ -19,6 +19,24 @@ CANONICAL_CATEGORIES = [
 FALLBACK_CATEGORY = "Uncategorized"
 
 
+# ------------------------------------------------------------------ months
+def month_bounds(month: str) -> tuple[date, date]:
+    """[first day of month, first day of next month) for a "YYYY-MM" string.
+
+    Range filters are portable across SQLite and PostgreSQL (SQLite's
+    strftime() does not exist in PostgreSQL) and can use the date index.
+    """
+    year, mon = (int(part) for part in month.split("-"))
+    start = date(year, mon, 1)
+    end = date(year + 1, 1, 1) if mon == 12 else date(year, mon + 1, 1)
+    return start, end
+
+
+def _in_month(column, month: str):
+    start, end = month_bounds(month)
+    return (column >= start) & (column < end)
+
+
 # --------------------------------------------------------------- categories
 def seed_default_categories(db: Session) -> None:
     """Idempotently ensure canonical categories + fallback exist."""
@@ -73,6 +91,7 @@ def create_expense(
     description: str = "",
     source: str = "manual",
     external_id: Optional[str] = None,
+    import_basis: Optional[str] = None,
 ) -> Expense:
     category = get_or_create_category(db, category_name)
     expense = Expense(
@@ -83,6 +102,7 @@ def create_expense(
         category_id=category.id,
         source=source,
         external_id=external_id,
+        import_basis=import_basis,
     )
     db.add(expense)
     try:
@@ -124,7 +144,7 @@ def list_expenses(
 ) -> list[Expense]:
     stmt = select(Expense).join(Category)
     if month:
-        stmt = stmt.where(func.strftime("%Y-%m", Expense.expense_date) == month)
+        stmt = stmt.where(_in_month(Expense.expense_date, month))
     if category:
         stmt = stmt.where(func.lower(Category.name) == category.lower())
     if source:
@@ -165,7 +185,7 @@ def spent_for_category_month(db: Session, category_id: int, month: str) -> float
     total = db.scalar(
         select(func.coalesce(func.sum(Expense.amount), 0.0)).where(
             Expense.category_id == category_id,
-            func.strftime("%Y-%m", Expense.expense_date) == month,
+            _in_month(Expense.expense_date, month),
         )
     )
     return round(float(total or 0.0), 2)
@@ -176,8 +196,36 @@ def category_totals_for_month(db: Session, month: str) -> list[dict]:
     rows = db.execute(
         select(Category.name, func.coalesce(func.sum(Expense.amount), 0.0), func.count(Expense.id))
         .join(Expense, Expense.category_id == Category.id)
-        .where(func.strftime("%Y-%m", Expense.expense_date) == month)
+        .where(_in_month(Expense.expense_date, month))
         .group_by(Category.name)
         .order_by(func.sum(Expense.amount).desc())
     ).all()
     return [{"category": name, "total": round(float(total), 2), "count": count} for name, total, count in rows]
+
+
+def source_totals_for_month(db: Session, month: str) -> list[dict]:
+    """Totals split by origin so imported costs are never confused with
+    manually entered ones (manual | subscription_tracker | smart_home_energy)."""
+    from models import origin_of
+
+    rows = db.execute(
+        select(Expense.source, Expense.external_id, Expense.amount).where(_in_month(Expense.expense_date, month))
+    ).all()
+    buckets: dict[str, dict] = {}
+    for source, external_id, amount in rows:
+        bucket = buckets.setdefault(origin_of(source, external_id), {"total": 0.0, "count": 0})
+        bucket["total"] += amount
+        bucket["count"] += 1
+    order = ["manual", "subscription_tracker", "smart_home_energy", "integration"]
+    return [
+        {"origin": key, "total": round(buckets[key]["total"], 2), "count": buckets[key]["count"]}
+        for key in sorted(buckets, key=lambda k: order.index(k) if k in order else len(order))
+    ]
+
+
+def manual_expenses_in_month(db: Session, month: str) -> list[Expense]:
+    return list(
+        db.scalars(
+            select(Expense).where(Expense.source == "manual", _in_month(Expense.expense_date, month))
+        ).all()
+    )

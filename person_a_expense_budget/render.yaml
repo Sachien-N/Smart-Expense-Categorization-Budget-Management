@@ -1,0 +1,51 @@
+# Render Blueprint for the expense-budget-api FastAPI backend.
+#
+# The GitHub repository keeps this project in the `person_a_expense_budget/` sub-folder, so:
+#   Render dashboard -> New -> Blueprint -> pick the repo ->
+#   Blueprint Path = person_a_expense_budget/render.yaml
+# (or copy this file to the repository root - rootDir below stays the same).
+#
+# Database: a Render PostgreSQL instance, because the free web-service disk is
+# ephemeral (SQLite files are wiped on every deploy/restart and free services
+# cannot attach a persistent disk). Free Render Postgres expires 30 days after
+# creation and a workspace may only own one free database - upgrade the plan
+# or recreate it before the expiry date. To use SQLite on a paid instance
+# instead, attach a disk at /var/data and set DATABASE_URL=sqlite:////var/data/expense_budget.db
+services:
+  - type: web
+    name: expense-budget-api
+    runtime: python
+    plan: free
+    rootDir: person_a_expense_budget
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: SERVICE_NAME
+        value: expense-budget-api
+      - key: DATABASE_URL
+        fromDatabase:
+          name: expense-budget-db
+          property: connectionString
+      # Peer backends (set in the Render dashboard once B and C are deployed):
+      - key: SUBSCRIPTION_API_URL
+        sync: false   # e.g. https://subscription-cost-tracker.onrender.com
+      - key: ELECTRICITY_API_URL
+        sync: false   # e.g. https://smart-home-energy-monitor.onrender.com
+      # A sleeping free Render peer needs ~50 s to wake: allow it once, retry once.
+      - key: INTEGRATION_CONNECT_TIMEOUT_SECONDS
+        value: "10"
+      - key: INTEGRATION_TIMEOUT_SECONDS
+        value: "60"
+      - key: INTEGRATION_MAX_RETRIES
+        value: "1"
+
+databases:
+  - name: expense-budget-db
+    plan: free
+    databaseName: expense_budget
+    user: expense_budget
+    ipAllowList: []   # only Render services in the same region/workspace can connect

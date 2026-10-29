@@ -89,8 +89,8 @@ streamlit run app.py
 In A's `.env`, set:
 
 ```
-INTEGRATION_B_BASE_URL=http://127.0.0.1:8002
-INTEGRATION_C_BASE_URL=http://127.0.0.1:8003
+SUBSCRIPTION_API_URL=http://127.0.0.1:8002
+ELECTRICITY_API_URL=http://127.0.0.1:8003
 ```
 
 Then use the **Integrations** page in A's dashboard (or

@@ -3,33 +3,30 @@
 The UI is a standalone REST client: set API_BASE_URL to the backend URL
 (default http://127.0.0.1:8001). Run:  streamlit run app.py
 """
-import os
 from datetime import date
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from ui_common import api_delete, api_get, api_post, money
+from ui_common import resolve_api_base_url, api_delete, api_get, api_post, money
 
 st.set_page_config(page_title="Expense & Budget Manager (A)", layout="wide")
 
 
-def _api_base_url(default: str) -> str:
-    """Resolve the backend URL: env var first (local runs / Render), then
-    Streamlit Community Cloud secrets (the Secrets editor is surfaced through
-    st.secrets), then the local default."""
-    value = os.getenv("API_BASE_URL")
-    if value:
-        return value
-    try:
-        return st.secrets.get("API_BASE_URL", default)
-    except Exception:  # no secrets file in a plain local run
-        return default
+API_BASE_URL = resolve_api_base_url(st.secrets)
 
-
-API_BASE_URL = _api_base_url("http://127.0.0.1:8001")
-
+ORIGIN_LABELS = {
+    "manual": "Manual expenses",
+    "subscription_tracker": "Subscriptions (from B)",
+    "smart_home_energy": "Electricity (from C)",
+    "integration": "Other imports",
+}
+STATUS_TEXT = {
+    "available": "ONLINE", "ok": "OK", "empty": "NOTHING TO IMPORT", "unavailable": "OFFLINE",
+    "timeout": "TIMED OUT", "unauthorized": "UNAUTHORIZED", "invalid_response": "BAD RESPONSE",
+    "not_configured": "NOT CONFIGURED", "misconfigured": "BAD URL",
+}
 CATEGORY_COLORS = {
     "Food": "#f97316",
     "Travel": "#0ea5e9",
@@ -72,6 +69,16 @@ if page == "Dashboard":
         col2.metric("Transactions", data["transaction_count"])
         over = [b for b in data["budget_comparison"] if b["over_budget"]]
         col3.metric("Budgets exceeded", len(over))
+
+        sources = {row["origin"]: row for row in data.get("by_source", [])}
+        if sources:
+            s1, s2, s3 = st.columns(3)
+            for col, key in zip((s1, s2, s3), ("manual", "subscription_tracker", "smart_home_energy")):
+                row = sources.get(key, {"total": 0.0, "count": 0})
+                col.metric(ORIGIN_LABELS[key], money(row["total"]), f"{row['count']} rows", delta_color="off")
+            st.caption("Imported rows come from the Integrations page sync. Each subscription is counted once "
+                       "per month and each electricity month once (an estimate is replaced by the actual bill), "
+                       "so refreshing this page or re-running the sync never double counts.")
 
         if data["by_category"]:
             df = pd.DataFrame(data["by_category"])
@@ -169,8 +176,12 @@ elif page == "All Expenses":
     elif not expenses:
         st.info("No expenses match these filters.")
     else:
-        df = pd.DataFrame(expenses)[["id", "expense_date", "merchant", "category", "amount", "source"]]
+        df = pd.DataFrame(expenses)
+        df["origin"] = df["origin"].map(ORIGIN_LABELS).fillna(df["origin"])
+        df = df[["id", "expense_date", "merchant", "category", "amount", "origin", "import_basis"]]
         st.dataframe(df, use_container_width=True, hide_index=True)
+        st.caption("import_basis: monthly_normalized = subscription cost spread per month; "
+                   "actual = recorded electricity bill; estimated = usage-based estimate (not an official bill).")
 
         expense_id = st.number_input("Expense ID to delete", min_value=1, step=1)
         if st.button("Delete selected expense"):
@@ -243,16 +254,35 @@ elif page == "Integrations":
     else:
         cols = st.columns(len(status["services"]))
         for col, svc in zip(cols, status["services"]):
-            badge = {"available": "ONLINE", "unavailable": "OFFLINE",
-                     "invalid_response": "BAD RESPONSE", "not_configured": "NOT CONFIGURED"}
-            col.metric(svc["service_key"], badge.get(svc["status"], svc["status"].upper()))
-            col.caption(f"{svc.get('peer_service_name') or '-'} | {svc.get('latency_ms') or '-'} ms")
+            label = ORIGIN_LABELS.get(svc["service_key"], svc["service_key"])
+            col.metric(label, STATUS_TEXT.get(svc["status"], svc["status"].upper()))
+            col.caption(f"{svc.get('base_url') or 'URL not set'} | {svc.get('latency_ms') or '-'} ms")
+            if svc.get("error"):
+                col.warning(svc["error"])
+            elif svc["status"] == "not_configured":
+                col.info("Set SUBSCRIPTION_API_URL / ELECTRICITY_API_URL on the A backend.")
 
-    if st.button("Run sync now (idempotent)"):
+    st.markdown("#### Import external costs")
+    st.caption("Subscriptions: active INR plans, monthly-normalized, one row per plan per month. "
+               "Electricity: settled months from C's /history - the actual bill when recorded, otherwise a "
+               "closed month's estimate, upgraded in place once the actual bill arrives.")
+    if st.button("Run sync now (safe to repeat)"):
         with st.spinner("Syncing from B and C over HTTP..."):
             ok, result = api_post(API_BASE_URL, "/integrations/sync", {})
-        if ok:
-            st.success(f"Sync finished - overall: **{result['overall']}**")
-            st.json(result)
-        else:
+        if not ok:
             st.error(result)
+        else:
+            overall = result["overall"]
+            (st.success if overall == "ok" else st.warning if overall == "partial" else st.error)(
+                f"Sync finished - overall: **{overall}**"
+            )
+            for res in result["results"]:
+                label = ORIGIN_LABELS.get(res["source"], res["source"])
+                line = (f"**{label}** - {STATUS_TEXT.get(res['status'], res['status'])}: "
+                        f"{res['imported']} imported, {res.get('updated', 0)} updated, {res['skipped']} unchanged/skipped")
+                if res["status"] in ("ok", "empty"):
+                    st.write(line)
+                else:
+                    st.error(line + (f" - {res['error']}" if res.get("error") else ""))
+                if res.get("details"):
+                    st.dataframe(pd.DataFrame(res["details"]), use_container_width=True, hide_index=True)

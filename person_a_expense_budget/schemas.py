@@ -41,7 +41,11 @@ class ExpenseOut(BaseModel):
     amount: float
     category: str
     source: Literal["manual", "integration"]
+    # manual | subscription_tracker | smart_home_energy (derived from external_id)
+    origin: str
     external_id: Optional[str] = None
+    # monthly_normalized | actual | estimated for imported rows; null for manual ones
+    import_basis: Optional[str] = None
     created_at: datetime
 
 
@@ -99,11 +103,20 @@ class BudgetComparison(BaseModel):
     over_budget: bool
 
 
+class SourceShare(BaseModel):
+    origin: Literal["manual", "subscription_tracker", "smart_home_energy", "integration"]
+    total: float
+    count: int
+
+
 class MonthlySummary(BaseModel):
     month: str
     total_expenses: float
     transaction_count: int
     by_category: list[CategoryShare]
+    # Same money as by_category, split by where it came from, so imported
+    # subscription / electricity costs are visible separately from manual ones.
+    by_source: list[SourceShare] = Field(default_factory=list)
     budget_comparison: list[BudgetComparison]
 
 
@@ -120,7 +133,9 @@ class CategorizeSuggestion(BaseModel):
 class ServiceStatus(BaseModel):
     service_key: str
     base_url: Optional[str] = None
-    status: Literal["available", "unavailable", "invalid_response", "not_configured"]
+    status: Literal[
+        "available", "unavailable", "timeout", "unauthorized", "invalid_response", "not_configured", "misconfigured"
+    ]
     peer_service_name: Optional[str] = None
     peer_version: Optional[str] = None
     latency_ms: Optional[float] = None
@@ -134,10 +149,14 @@ class IntegrationsStatus(BaseModel):
 
 class SyncSourceResult(BaseModel):
     source: str
-    status: Literal["ok", "unavailable", "invalid_response", "not_configured", "empty"]
+    status: Literal[
+        "ok", "empty", "unavailable", "timeout", "unauthorized", "invalid_response", "not_configured", "misconfigured"
+    ]
     imported: int = 0
+    updated: int = 0
     skipped: int = 0
     basis: Optional[str] = None
+    period: Optional[str] = None
     error: Optional[str] = None
     details: list[dict] = Field(default_factory=list)
 
