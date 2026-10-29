@@ -7,7 +7,8 @@ import os
 import tempfile
 
 _TMP = tempfile.mkdtemp(prefix="csi3007_a_tests_")
-os.environ["DATABASE_URL"] = f"sqlite:///{_TMP}/test_expense_budget.db"
+# TEST_DATABASE_URL lets the same suite run against PostgreSQL (must be an empty DB).
+os.environ["DATABASE_URL"] = os.getenv("TEST_DATABASE_URL") or f"sqlite:///{_TMP}/test_expense_budget.db"
 os.environ["INTEGRATION_B_BASE_URL"] = ""
 os.environ["INTEGRATION_C_BASE_URL"] = ""
 os.environ["INTEGRATION_TIMEOUT_SECONDS"] = "0.5"

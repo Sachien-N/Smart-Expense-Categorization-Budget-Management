@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environment (never commit real env files - only .env.example)
+.env
+.env.local
+
+# Local SQLite databases (each project owns its OWN database file)
+data/*.db
+data/*.sqlite3
+data/*.sqlite3-journal
+data/*.db-journal
+*.db-wal
+*.db-shm
+
+# Test / tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS noise
+.DS_Store
+Thumbs.db

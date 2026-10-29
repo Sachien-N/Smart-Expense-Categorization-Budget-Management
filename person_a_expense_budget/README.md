@@ -31,9 +31,12 @@ apps strictly over HTTP REST**:
 - **Integrations (the CSI3007 headline)**: `POST /integrations/sync` pulls
   Person B's subscriptions (normalized monthly cost) and Person C's electricity
   bills into local expenses. Every import carries a **stable external id**
-  (`B:B-SUB-4:2026-10`, `C:actual:2026-09`) with a UNIQUE constraint, so
-  re-running a sync **never duplicates**. Outbound calls use explicit
-  timeouts, bounded retries, contract-key validation, and a peer outage is
+  (`B:B-SUB-4:2026-10`, `C:2026-09`) with a UNIQUE constraint, so re-running
+  a sync **never duplicates**; an electricity estimate is upgraded in place
+  when the actual bill arrives. Imported costs are labelled (`origin`,
+  `import_basis`, `GET /summary` -> `by_source`) separately from manual ones.
+  Outbound calls use a pooled session, explicit connect/read timeouts,
+  bounded GET-only retries, contract-key validation, and a peer outage is
   reported per-source - it never breaks A or the other source.
 - **Streamlit dashboard**: KPIs, donut chart of spend split, budget progress
   bars, expense CRUD, budget setup, category drill-down, live integration
@@ -79,13 +82,15 @@ Interactive API docs: <http://127.0.0.1:8001/docs>
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///./data/expense_budget.db` | Own SQLite file (never shared) |
-| `APP_PORT` | `8001` | Backend port |
-| `API_BASE_URL` (frontend) | `http://127.0.0.1:8001` | Where Streamlit finds the API |
-| `INTEGRATION_B_BASE_URL` | - | Person B base URL (blank = integration off) |
-| `INTEGRATION_C_BASE_URL` | - | Person C base URL (blank = integration off) |
-| `INTEGRATION_TIMEOUT_SECONDS` | `3.0` | Outbound connect+read timeout |
-| `INTEGRATION_MAX_RETRIES` | `2` | Bounded retries (connection errors / 5xx only) |
+| `DATABASE_URL` | `data/expense_budget.db` (SQLite) | Own database. Relative SQLite paths resolve against this folder; `postgres://`/`postgresql://` URLs (Render Postgres) are supported |
+| `APP_PORT` | `8001` | Backend port (Render injects `$PORT` instead) |
+| `API_BASE_URL` (frontend) | `http://127.0.0.1:8001` | Where Streamlit finds the API (env var, else Streamlit secret) |
+| `API_TIMEOUT_SECONDS` (frontend) | `60` | Frontend read timeout (covers Render cold starts) |
+| `SUBSCRIPTION_API_URL` | - | Person B base URL (blank = integration off). Alias: `INTEGRATION_B_BASE_URL` |
+| `ELECTRICITY_API_URL` | - | Person C base URL (blank = integration off). Alias: `INTEGRATION_C_BASE_URL` |
+| `INTEGRATION_CONNECT_TIMEOUT_SECONDS` | `3.0` | Outbound connect timeout |
+| `INTEGRATION_TIMEOUT_SECONDS` | `10.0` | Outbound read timeout (use ~60 when peers are free Render instances) |
+| `INTEGRATION_MAX_RETRIES` | `2` | Bounded retries for GETs (connection errors, timeouts, 5xx only) |
 | `INTEGRATION_RETRY_BACKOFF_SECONDS` | `0.5` | Linear backoff per attempt |
 
 ## API summary
@@ -136,24 +141,50 @@ person_a_expense_budget/
 
 - **Person B**: `GET {B}/integration/export` ->
   `{service, contract_version, generated_at, count, subscriptions:[{external_ref, name, category, tags, billing_frequency, amount, monthly_cost, currency, active, next_renewal_date}]}`.
-  A imports each **active** subscription as a monthly `Subscriptions` expense
-  (dated the 1st of the sync month) with `external_id = B:{external_ref}:{month}`.
+  Each **active, INR** subscription becomes ONE `Subscriptions` expense per
+  calendar month (dated the 1st of the sync month), amount = B's
+  monthly-normalized cost (yearly 12000 -> 1000.00), identity
+  `external_id = B:{external_ref}:{YYYY-MM}`, `import_basis = monthly_normalized`.
+  Re-syncing in the same month updates the amount if B's price changed;
+  inactive and non-INR subscriptions are skipped and reported.
 - **Person C**: `GET {C}/history?months=6` ->
-  `{months:[{month, estimated_kwh, actual_kwh, estimated_amount, actual_amount, deviation_percent, needs_investigation}]}`.
-  A imports the most recent month that has an **actual** bill; if none, the most
-  recent **completed** month's estimate, with `external_id = C:{basis}:{month}`.
-- Failure semantics: unavailable / invalid-response / empty are distinct
-  statuses in the sync result; a partial failure never blocks the other source
-  and never returns HTTP 500.
+  `{months:[{month, estimated_kwh, actual_kwh, estimated_amount, actual_amount, deviation_percent, needs_investigation}], tariff_name, tariff_verified, estimate_disclaimer}`.
+  Every **settled** month in that window becomes ONE `Bills` expense,
+  identity `external_id = C:{YYYY-MM}`: the actual bill when C has one
+  (`import_basis = actual`), otherwise a closed month's estimate
+  (`import_basis = estimated`, merchant suffixed "(estimate)"). The running
+  month is never imported. When an actual bill is recorded later, the
+  estimate row is **upgraded in place** - estimate and actual are never both
+  counted. v1.0 ids (`C:actual:<month>` / `C:estimated:<month>`) are migrated
+  to the new identity on first sync.
+- **Manual vs imported**: `expenses.source` is `manual` or `integration`;
+  `origin` (in every expense response) is `manual`, `subscription_tracker` or
+  `smart_home_energy`, and `GET /summary` reports `by_source` totals. If a
+  manual expense already covers the same cost in that month (same
+  subscription name + amount, or an electricity/TNEB bill), the import is
+  skipped as `skipped_manual_duplicate` so the cost is not counted twice.
+- **Model**: imported rows are *synchronized records* (upserted by identity),
+  not live summaries. Deleting an imported row in A and syncing again
+  re-imports it.
+- Failure semantics: `not_configured`, `misconfigured`, `unavailable`,
+  `timeout`, `unauthorized`, `invalid_response` and `empty` are distinct
+  statuses; a failing source never blocks the other and never returns 500.
 
 ## Known limitations & unverified items
 
 - Keyword rules are heuristic and English/Tamil-Nadu-merchant oriented; they
   are configurable in `services/categorizer.py`.
-- Currency is assumed INR throughout; no FX handling.
-- Integration rows are re-dated to the 1st of the sync month (subscription
-  billing dates may differ) - documented behaviour, kept simple on purpose.
-- SQLite is single-writer; fine for a course-scale demo, not for concurrency.
+- Currency is INR throughout; non-INR subscriptions from B are skipped
+  (reported as `skipped_unsupported_currency`), never converted.
+- Integration rows are dated the 1st of their month (subscription billing
+  dates may differ) and a subscription is imported only for the month in
+  which a sync runs - months with no sync get no subscription row.
+- The manual-duplicate check is a heuristic (name/amount or electricity
+  keywords in the same month); review `details` in the sync result.
+- SQLite is single-writer; fine for local demos. Cloud deployments use
+  PostgreSQL (see `RENDER_DEPLOYMENT.md`).
+- Database schema changes are additive only (`import_basis` column added on
+  startup via `ALTER TABLE ... ADD COLUMN`); there is no Alembic history.
 
 ## Git quickstart (GitHub-ready)
 

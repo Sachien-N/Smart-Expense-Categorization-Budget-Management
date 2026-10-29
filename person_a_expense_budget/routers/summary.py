@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from crud import category_totals_for_month, list_budgets, spent_for_category_month
+from crud import category_totals_for_month, list_budgets, source_totals_for_month, spent_for_category_month
 from database import get_db
 from schemas import (
     BudgetComparison,
@@ -13,6 +13,7 @@ from schemas import (
     CategorizeSuggestion,
     IntegrationsStatus,
     MonthlySummary,
+    SourceShare,
     SyncResult,
     SyncSourceResult,
 )
@@ -62,6 +63,7 @@ def monthly_summary_endpoint(
         total_expenses=grand_total,
         transaction_count=sum(row["count"] for row in rows),
         by_category=by_category,
+        by_source=[SourceShare(**row) for row in source_totals_for_month(db, month)],
         budget_comparison=budget_comparison,
     )
 
@@ -96,9 +98,11 @@ def integrations_status_endpoint():
 def integrations_sync_endpoint(db: Session = Depends(get_db)):
     """Pull Person B subscriptions + Person C bills into local expenses.
 
-    Idempotent: imports carry a stable external_id; re-running skips
-    already-imported rows. Partial failures are reported per source and
-    never break the whole call.
+    Idempotent: imports carry a stable external_id ("B:<ref>:<YYYY-MM>",
+    "C:<YYYY-MM>"); re-running updates changed amounts in place and never
+    adds a second row. A C estimate is upgraded to the actual bill when one
+    is recorded. Partial failures are reported per source and never break
+    the whole call.
     """
     from services.integration_service import sync_all
 

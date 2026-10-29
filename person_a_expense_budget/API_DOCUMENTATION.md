@@ -163,13 +163,14 @@ Live probe of both peers (short timeout, no retries):
     {"service_key": "smart_home_energy", "base_url": "http://127.0.0.1:8003",
      "status": "unavailable", "peer_service_name": null,
      "peer_version": null, "latency_ms": null,
-     "error": "connection_error: ConnectionError"}
+     "error": "unavailable: cannot connect to 127.0.0.1:8003/health"}
   ]
 }
 ```
 
-`status` ∈ `available | unavailable | invalid_response | not_configured`
-(`not_configured` when the env var is blank - integration intentionally off).
+`status` ∈ `available | unavailable | timeout | unauthorized | invalid_response | not_configured | misconfigured`
+(`not_configured` when the env var is blank - integration intentionally off;
+`misconfigured` when the URL lacks `http://` / `https://`).
 
 ### `POST /integrations/sync`
 Pulls both peers and imports idempotently. **Partial failure never blocks the
@@ -180,27 +181,35 @@ other source and never returns 500.**
   "synced_at": "2026-10-28T13:34:56.873193+00:00",
   "overall": "ok",
   "results": [
-    {"source": "subscription_tracker", "status": "ok", "imported": 9, "skipped": 1,
-     "basis": null, "error": null,
+    {"source": "subscription_tracker", "status": "ok", "imported": 2, "updated": 0, "skipped": 1,
+     "basis": "monthly_normalized", "period": "2026-10", "error": null,
      "details": [
-       {"external_ref": "B-SUB-10", "action": "skipped_inactive"},
-       {"external_ref": "B-SUB-2", "action": "imported"} ]},
-    {"source": "smart_home_energy", "status": "ok", "imported": 1, "skipped": 0,
-     "basis": "actual", "error": null,
-     "details": [{"external_ref": "C:actual:2026-09", "action": "imported"}]}
+       {"external_ref": "B-SUB-3", "action": "skipped_inactive"},
+       {"external_ref": "B-SUB-1", "action": "imported", "amount": 649.0},
+       {"external_ref": "B-SUB-2", "action": "imported", "amount": 1000.0} ]},
+    {"source": "smart_home_energy", "status": "ok", "imported": 0, "updated": 1, "skipped": 0,
+     "basis": null, "period": null, "error": null,
+     "details": [{"external_ref": "C:2026-09", "action": "upgraded_estimate_to_actual",
+                  "basis": "actual", "amount": 588.0}]}
   ]
 }
 ```
 
-- B imports: active subscriptions -> `Subscriptions` expenses, amount =
-  pre-normalized `monthly_cost`, `external_id = B:{external_ref}:{YYYY-MM}`.
-- C imports: most recent month with an actual bill, else the most recent
-  completed month's estimate -> `Bills` expense, `external_id = C:{basis}:{month}`.
-- `action` values: `imported`, `already_imported`, `skipped_inactive`,
-  `skipped_invalid_payload`, `skipped_malformed_entry`.
-- `overall` ∈ `ok | partial | failed`.
-- Idempotency: re-running always yields `already_imported` (UNIQUE index on
-  `expenses.external_id`) - verified live and in the test suite.
+- B imports: active INR subscriptions -> `Subscriptions` expenses, amount =
+  pre-normalized `monthly_cost`, `external_id = B:{external_ref}:{YYYY-MM}`,
+  `import_basis = monthly_normalized`.
+- C imports: every settled month in the 6-month window -> `Bills` expense,
+  `external_id = C:{YYYY-MM}`; actual bill if recorded, else a closed month's
+  estimate; estimates are upgraded in place when the actual arrives.
+- `action` values: `imported`, `already_imported`, `updated_amount`,
+  `upgraded_estimate_to_actual`, `skipped_inactive`, `skipped_invalid_payload`,
+  `skipped_malformed_entry`, `skipped_unsupported_currency`,
+  `skipped_manual_duplicate`.
+- `status` per source ∈ `ok | empty | not_configured | misconfigured | unavailable | timeout | unauthorized | invalid_response`;
+  `overall` ∈ `ok | partial | failed`.
+- Idempotency: re-running yields `already_imported` and identical totals
+  (UNIQUE index on `expenses.external_id`) - verified live (SQLite and
+  PostgreSQL) and in the test suite.
 
 ## Consumed peer contracts (frozen)
 
