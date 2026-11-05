@@ -19,7 +19,8 @@ Liveness + database connectivity probe (also polled by teammates' tools).
   "status": "ok",
   "service": "expense-budget-api",
   "owner": "Person A - Sachien N (23MID0255)",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "database_backend": "sqlite",
   "database": "connected",
   "time": "2026-10-28T13:35:59.082892+00:00"
 }
@@ -42,8 +43,8 @@ curl -X POST http://127.0.0.1:8001/expenses \
 {
   "id": 1, "expense_date": "2026-10-05", "merchant": "Netflix",
   "description": "", "amount": 199.0, "category": "Subscriptions",
-  "source": "manual", "external_id": null,
-  "created_at": "...", "updated_at": "..."
+  "source": "manual", "origin": "manual", "external_id": null,
+  "import_basis": null, "created_at": "..."
 }
 ```
 
@@ -101,6 +102,11 @@ zero** (`total_expenses: 0.0`, empty lists), not an error.
   "transaction_count": 14,
   "by_category": [
     {"category": "Shopping", "total": 1580.0, "count": 1, "share_percent": 19.5}
+  ],
+  "by_source": [
+    {"origin": "manual", "total": 6533.4, "count": 11},
+    {"origin": "subscription_tracker", "total": 1449.0, "count": 2},
+    {"origin": "smart_home_energy", "total": 141.0, "count": 1}
   ],
   "budget_comparison": [
     {"category": "Food", "budget": 3000.0, "spent": 1041.5,

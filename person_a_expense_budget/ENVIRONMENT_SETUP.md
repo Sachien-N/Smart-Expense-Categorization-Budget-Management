@@ -100,7 +100,7 @@ costs and the electricity bill land as categorized expenses - idempotently.
 ## Tests
 
 ```bash
-python -m pytest -q          # 23 tests, uses a throwaway SQLite file
+python -m pytest -q          # 44 tests, uses a throwaway SQLite file
 ```
 
 ## Troubleshooting

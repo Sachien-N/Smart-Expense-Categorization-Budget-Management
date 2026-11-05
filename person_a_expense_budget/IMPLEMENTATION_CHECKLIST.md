@@ -35,7 +35,7 @@ Status legend: `[x]` done with evidence - `[!]` done but flagged / unverified -
 - [x] Distinguish `unavailable` / `invalid_response` / `empty` / `not_configured`
 - [x] `GET /integrations/status` live health probe of B and C
 - [x] `POST /integrations/sync` idempotent imports via stable external ids
-      (`B:{external_ref}:{month}`, `C:{basis}:{month}`) + UNIQUE index
+      (`B:{external_ref}:{month}`, `C:{month}`) + UNIQUE index
 - [x] Partial-failure isolation: B down doesn't block C; never a 500
 - [x] No shared database files - A only calls B's `/integration/export`
       and C's `/history?months=6`
@@ -48,12 +48,12 @@ Status legend: `[x]` done with evidence - `[!]` done but flagged / unverified -
 - [x] Budgets: table + create form
 - [x] Categories: list + drill-down
 - [x] Integrations: live status cards + sync button
-- [x] UI is a pure REST client (HTTP only), friendly API-down errors - `ui_common.py`
+- [x] UI is a pure HTTP client (Apps Script Sheets adapter via `ui_common.py`, plus the FastAPI backend for integration status/sync when BACKEND_API_URL is set), friendly API-down errors
 
 ## Quality assurance
 
-- [x] 23 pytest tests pass (unit + integration-mocked) - `tests/`
-      (`python -m pytest -q` -> `43 passed`)
+- [x] 44 pytest tests pass (unit + integration-mocked) - `tests/`
+      (`python -m pytest -q` -> `44 passed`)
 - [x] Validation tests: non-positive amount 422, bad month format 422, unknown ids 404, duplicate budget 409
 - [x] Categorizer tests: Netflix -> Subscriptions, Swiggy -> Food, fallback -> Uncategorized
 - [x] Integration tests: peers-down graceful, invalid-response flagged,

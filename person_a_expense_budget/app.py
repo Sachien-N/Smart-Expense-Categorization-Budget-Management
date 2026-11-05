@@ -12,6 +12,7 @@ import streamlit as st
 
 from ui_common import (
     resolve_api_base_url,
+    backend_url,
     configure,
     api_delete,
     api_get,
@@ -194,6 +195,14 @@ if API_BASE_URL.startswith("https://"):
 else:
     st.sidebar.warning("Check API_URL in Streamlit Secrets")
 
+if backend_url():
+    st.sidebar.success("Integration backend configured")
+else:
+    st.sidebar.caption(
+        "Optional: set BACKEND_API_URL in Secrets to enable live "
+        "integration status and sync from this app."
+    )
+
 
 # ---------------------------------------------------------------------
 # Dashboard
@@ -311,8 +320,10 @@ elif page == "Add Expense":
             category = st.selectbox("Category", categories)
             origin = st.selectbox(
                 "Source",
-                options=["manual", "integration"],
+                options=["manual", "subscription_tracker", "smart_home_energy"],
                 format_func=lambda value: ORIGIN_LABELS.get(value, value),
+                help="Use 'Subscriptions (Person B)' or 'Electricity (Person C)' "
+                     "when logging one of those bills by hand.",
             )
 
         description = st.text_area(
@@ -335,7 +346,7 @@ elif page == "Add Expense":
             payload = {
                 "merchant": merchant.strip(),
                 "amount": round(float(amount), 2),
-                "date": expense_date.isoformat(),
+                "expense_date": expense_date.isoformat(),
                 "category": category,
                 "description": description.strip(),
                 "origin": origin,
@@ -429,7 +440,7 @@ elif page == "All Expenses":
     with col3:
         source_filter = st.selectbox(
             "Source",
-            ["All", "manual", "subscription_tracker", "smart_home_energy", "integration"],
+            ["All", "manual", "subscription_tracker", "smart_home_energy"],
             format_func=lambda value: (
                 "All sources" if value == "All"
                 else ORIGIN_LABELS.get(value, value)
@@ -544,7 +555,7 @@ elif page == "Budgets":
         payload = {
             "month": month,
             "category": budget_category,
-            "amount": round(float(budget_amount), 2),
+            "amount_limit": round(float(budget_amount), 2),
         }
 
         with st.spinner("Saving budget..."):
@@ -640,11 +651,22 @@ elif page == "Categories":
 
 elif page == "Integrations":
     st.subheader("🔗 Integrations")
-    st.write(
-        "This page shows integration status and requests a data sync. "
-        "Person B and Person C must have reachable APIs configured "
-        "in the backend before their data can be imported."
-    )
+
+    if backend_url():
+        st.write(
+            "Status is checked live against the FastAPI integration backend. "
+            "A sync pulls Person B's subscriptions and Person C's electricity "
+            "bills into the backend database and then mirrors the imported "
+            "expenses into Google Sheets (no duplicates, idempotent by "
+            "external id)."
+        )
+    else:
+        st.warning(
+            "BACKEND_API_URL is not configured in Streamlit Secrets, so live "
+            "status and sync are unavailable from this page. Add it under "
+            "App settings → Secrets, or run the sync against the FastAPI "
+            "backend directly (POST /integrations/sync)."
+        )
 
     if st.button("Check integration status"):
         ok, result = api_get(API_BASE_URL, "/integrations/status")
@@ -657,29 +679,28 @@ elif page == "Integrations":
 
     st.divider()
     st.markdown("#### Synchronize data")
-
-    sync_source = st.selectbox(
-        "Integration to synchronize",
-        ["all", "subscription_tracker", "smart_home_energy"],
-        format_func=lambda value: {
-            "all": "All integrations",
-            "subscription_tracker": "Person B — Subscription Tracker",
-            "smart_home_energy": "Person C — Electricity Manager",
-        }.get(value, value),
+    st.caption(
+        "Sync always processes both sources: Person B (subscriptions) and "
+        "Person C (electricity bills). Re-running a sync never creates "
+        "duplicate expenses."
     )
 
     if st.button("Start sync", type="primary"):
-        payload = {"source": sync_source}
-
-        with st.spinner("Requesting synchronization..."):
+        with st.spinner(
+            "Requesting synchronization (free-tier backends can take up to "
+            "~3 minutes on a cold start)..."
+        ):
             ok, result = api_post(
                 API_BASE_URL,
                 "/integrations/sync",
-                payload,
+                {},
             )
 
         if ok:
-            st.success("Sync request completed.")
+            if isinstance(result, dict) and result.get("overall") in ("ok", "partial"):
+                st.success(f"Sync finished with overall status: {result.get('overall')}")
+            else:
+                st.warning("Sync finished, but no data may have been imported. Check the details.")
             st.json(result if isinstance(result, dict) else {"result": result})
         else:
             show_api_error(result)

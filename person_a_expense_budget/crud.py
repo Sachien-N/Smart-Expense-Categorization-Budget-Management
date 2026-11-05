@@ -115,9 +115,15 @@ def create_expense(
 
 
 def update_expense(db: Session, expense: Expense, changes: dict) -> Expense:
-    if "category" in changes and changes["category"]:
-        category = get_or_create_category(db, changes.pop("category"))
-        expense.category_id = category.id
+    changes = dict(changes or {})
+    # "category" is a read-only property on Expense (derived from category_id).
+    # It must never reach setattr() below or an empty-string category crashes
+    # with AttributeError (500). Handle it explicitly, then drop it.
+    if "category" in changes:
+        requested = (changes.pop("category") or "").strip()
+        if requested:
+            category = get_or_create_category(db, requested)
+            expense.category_id = category.id
     for field, value in changes.items():
         if value is not None:
             setattr(expense, field, value)

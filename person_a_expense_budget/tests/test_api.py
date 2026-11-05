@@ -85,6 +85,20 @@ def test_update_and_delete_expense(client):
     assert client.get(f"/expenses/{created['id']}").status_code == 404
 
 
+def test_update_with_empty_category_does_not_crash(client):
+    """Regression: PUT with {"category": ""} used to raise AttributeError
+    (category is a read-only property) and return HTTP 500."""
+    created = client.post(
+        "/expenses", json={"merchant": "Tea stall", "amount": 10.0, "expense_date": f"{MONTH}-11"}
+    ).json()
+    response = client.put(f"/expenses/{created['id']}", json={"category": ""})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["amount"] == 10.0
+    # Empty string must be ignored, not wipe the categorized category.
+    assert body["category"]
+
+
 def test_categorize_endpoint(client):
     response = client.get("/categorize", params={"merchant": "Swiggy dinner order"})
     assert response.status_code == 200

@@ -2,12 +2,18 @@
 
 Streamlit Community Cloud secrets required:
     API_URL = "https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
-    API_SECRET = "your_rotated_secret"
+    API_SECRET = "your_rotated_secret"        # store in Apps Script Script Properties too
+    BACKEND_API_URL = "https://...onrender.com"  # optional: FastAPI integration backend
 
 Apps Script must accept GET ?key=...&type=... and POST JSON:
 {"key": "...", "type": "expenses|budgets", "id": "...", "data": {...}}
 
 Records sheet columns: type | id | data | updatedAt
+
+When BACKEND_API_URL is configured, the /integrations/* calls are proxied to
+the real FastAPI backend (which performs the live Person B / Person C sync),
+and expenses imported by the backend are mirrored into Google Sheets
+idempotently (matched on external_id, never duplicated).
 """
 from __future__ import annotations
 
@@ -21,7 +27,8 @@ import requests
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8001"
 DEFAULT_TIMEOUT = (10, 30)
-_CONFIG: dict[str, str] = {"secret": ""}
+BACKEND_TIMEOUT = (10, 180)  # Render free tier can cold-start; sync probes peers too
+_CONFIG: dict[str, str] = {"secret": "", "backend_url": ""}
 _SESSION = requests.Session()
 _SESSION.headers.update({"Accept": "application/json"})
 
@@ -35,21 +42,30 @@ CATEGORIES = [
     {"id": 7, "name": "Uncategorized", "description": "Expenses without a matching rule", "is_active": True},
 ]
 
-CATEGORY_RULES = [
-    ("Subscriptions", ["netflix", "spotify", "prime", "hotstar", "jiocinema", "sonyliv", "zee5",
-                       "youtube premium", "adobe", "microsoft 365", "office 365", "icloud", "google one",
-                       "canva", "chatgpt", "notion", "subscription"]),
-    ("Entertainment", ["bookmyshow", "pvr", "inox", "cinema", "movie", "steam", "playstation",
-                       "xbox", "amusement", "concert", "event"]),
-    ("Food", ["swiggy", "zomato", "restaurant", "cafe", "coffee", "starbucks", "domino", "pizza",
-              "burger", "kfc", "mcdonald", "dunzo", "grocery", "supermarket", "aavin", "bakery", "food"]),
-    ("Travel", ["uber", "ola", "rapido", "irctc", "redbus", "abhibus", "indigo", "air india",
-                "metro", "petrol", "fuel", "toll", "fastag", "parking"]),
-    ("Bills", ["electricity", "tneb", "tangedco", "water bill", "gas bill", "broadband", "act fibernet",
-               "jiofiber", "airtel", "recharge", "mobile bill", "rent", "maintenance"]),
-    ("Shopping", ["amazon", "flipkart", "myntra", "ajio", "nykaa", "decathlon", "croma",
-                  "reliance digital", "vijay sales", "ikea", "pepperfry", "shopping", "mall", "tata cliq"]),
-]
+# Single source of truth for the keyword rules lives in services/categorizer.py
+# (the same rules the FastAPI backend uses). The import below keeps the Streamlit
+# frontend in sync with the backend; the inline fallback only covers the rare
+# case where ui_common.py is copied somewhere without the services package.
+try:
+    from services.categorizer import CATEGORY_RULES, FALLBACK_CATEGORY, categorize_merchant  # noqa: F401
+except ImportError:  # pragma: no cover - defensive
+    FALLBACK_CATEGORY = "Uncategorized"
+
+    CATEGORY_RULES = [
+        ("Subscriptions", ["netflix", "spotify", "prime", "hotstar", "jiocinema", "sonyliv", "zee5",
+                           "youtube premium", "adobe", "microsoft 365", "office 365", "icloud", "google one",
+                           "canva", "chatgpt", "notion", "subscription"]),
+        ("Entertainment", ["bookmyshow", "pvr", "inox", "cinema", "movie", "steam", "playstation",
+                           "xbox", "amusement", "concert", "event"]),
+        ("Food", ["swiggy", "zomato", "restaurant", "cafe", "coffee", "starbucks", "domino", "pizza",
+                  "burger", "kfc", "mcdonald", "dunzo", "grocery", "supermarket", "aavin", "bakery", "food"]),
+        ("Travel", ["uber", "ola", "rapido", "irctc", "redbus", "abhibus", "indigo", "air india",
+                    "metro", "petrol", "fuel", "toll", "fastag", "parking"]),
+        ("Bills", ["electricity", "tneb", "tangedco", "water bill", "gas bill", "broadband", "act fibernet",
+                   "jiofiber", "airtel", "recharge", "mobile bill", "rent", "maintenance"]),
+        ("Shopping", ["amazon", "flipkart", "myntra", "ajio", "nykaa", "decathlon", "croma",
+                      "reliance digital", "vijay sales", "ikea", "pepperfry", "shopping", "mall", "tata cliq"]),
+    ]
 
 
 def _secret(secrets: Any, key: str) -> str:
@@ -67,9 +83,43 @@ def resolve_api_base_url(secrets: Any = None, default: str = DEFAULT_BASE_URL) -
     return (value or default).rstrip("/")
 
 
+def resolve_backend_url(secrets: Any = None) -> str:
+    """Resolve the FastAPI integration backend URL (BACKEND_API_URL)."""
+    value = (os.getenv("BACKEND_API_URL") or "").strip()
+    if not value:
+        value = _secret(secrets, "BACKEND_API_URL")
+    return value.rstrip("/")
+
+
 def configure(secrets: Any = None) -> None:
     """Call configure(st.secrets) once in app.py."""
     _CONFIG["secret"] = os.getenv("API_SECRET", "").strip() or _secret(secrets, "API_SECRET")
+    _CONFIG["backend_url"] = resolve_backend_url(secrets)
+
+
+def backend_url() -> str:
+    """Configured FastAPI backend URL ('' when not set)."""
+    return _CONFIG.get("backend_url", "")
+
+
+def _backend_request(method: str, backend: str, path: str,
+                     params: Optional[dict] = None,
+                     json_body: Optional[dict] = None,
+                     timeout: tuple = BACKEND_TIMEOUT) -> tuple[bool, Any]:
+    """Call the FastAPI backend. Never raises; returns (ok, payload_or_error)."""
+    if not backend:
+        return False, "BACKEND_API_URL is not configured."
+    try:
+        if method == "GET":
+            response = _SESSION.get(backend + path, params=params or {}, timeout=timeout)
+        else:
+            response = _SESSION.post(backend + path, json=json_body or {}, timeout=timeout)
+        response.raise_for_status()
+        return True, response.json()
+    except requests.Timeout:
+        return False, "The FastAPI backend timed out (free-tier cold start can take ~60s). Please retry."
+    except (requests.RequestException, ValueError) as exc:
+        return False, f"FastAPI backend request failed ({exc.__class__.__name__}). Check BACKEND_API_URL."
 
 
 def _now() -> str:
@@ -77,12 +127,7 @@ def _now() -> str:
 
 
 def _categorize(merchant: str) -> tuple[str, Optional[str], str]:
-    text = (merchant or "").strip().lower()
-    for category, keywords in CATEGORY_RULES:
-        for keyword in keywords:
-            if keyword in text:
-                return category, keyword, "rule"
-    return "Uncategorized", None, "fallback"
+    return categorize_merchant(merchant)
 
 
 def _apps_request(method: str, base_url: str, record_type: str, record_id: str = "",
@@ -226,7 +271,10 @@ def api_get(base_url: str, path: str, params: Optional[dict] = None) -> tuple[bo
         if category:
             rows = [e for e in rows if e["category"] == category]
         if source:
-            rows = [e for e in rows if e["source"] == source]
+            # The UI filters on user-facing origin values (manual,
+            # subscription_tracker, smart_home_energy). Fall back to the raw
+            # source field for rows that pre-date the origin column.
+            rows = [e for e in rows if str(e.get("origin") or e.get("source") or "") == source]
         try:
             limit = max(1, min(int(params.get("limit", 100)), 1000))
         except (ValueError, TypeError):
@@ -296,13 +344,23 @@ def api_get(base_url: str, path: str, params: Optional[dict] = None) -> tuple[bo
                       "last_expense_date": max(dates) if dates else None, "expenses": matched}
 
     if route == "/integrations/status":
-        return True, {"checked_at": _now(), "services": [
+        backend = _CONFIG.get("backend_url", "")
+        if backend:
+            ok, payload = _backend_request("GET", backend, "/integrations/status",
+                                           timeout=(10, 60))
+            if ok:
+                return True, payload
+            return False, payload
+        return True, {"checked_at": _now(), "mode": "ui_local_storage",
+                      "services": [
             {"service_key": "subscription_tracker", "base_url": None, "status": "not_configured",
              "peer_service_name": "Person B Subscription Tracker", "peer_version": None,
-             "latency_ms": None, "error": "Person B API integration is not connected."},
+             "latency_ms": None, "error": "BACKEND_API_URL is not configured in Streamlit Secrets; "
+                                          "integration status can only be checked by the FastAPI backend."},
             {"service_key": "smart_home_energy", "base_url": None, "status": "not_configured",
              "peer_service_name": "Person C Electricity Manager", "peer_version": None,
-             "latency_ms": None, "error": "Person C API integration is not connected."},
+             "latency_ms": None, "error": "BACKEND_API_URL is not configured in Streamlit Secrets; "
+                                          "integration status can only be checked by the FastAPI backend."},
         ]}
     return False, f"Unsupported GET route: {path}"
 
@@ -329,13 +387,16 @@ def api_post(base_url: str, path: str, json_body: dict) -> tuple[bool, Any]:
         category = str(body.get("category") or _categorize(merchant)[0])
         if category not in [c["name"] for c in CATEGORIES]:
             return False, f"Unknown category: {category}"
+        origin = str(body.get("origin") or "manual").strip()
+        if origin not in ("manual", "subscription_tracker", "smart_home_energy"):
+            origin = "manual"
         ok, rows = _visible_expenses(base_url)
         if not ok:
             return False, rows
         record_id = str(_next_id(rows))
         record = {"id": int(record_id), "expense_date": expense_date, "merchant": merchant,
                   "description": str(body.get("description") or "").strip(), "amount": round(amount, 2),
-                  "category": category, "source": "manual", "origin": "manual",
+                  "category": category, "source": "manual", "origin": origin,
                   "external_id": body.get("external_id"), "import_basis": None,
                   "created_at": _now(), "_deleted": False}
         ok, result = _save(base_url, "expenses", record_id, record)
@@ -370,13 +431,73 @@ def api_post(base_url: str, path: str, json_body: dict) -> tuple[bool, Any]:
         return True, record
 
     if route == "/integrations/sync":
-        return True, {"synced_at": _now(), "overall": "failed", "results": [
-            {"source": "subscription_tracker", "status": "not_configured", "imported": 0, "updated": 0,
-             "skipped": 0, "error": "Person B API is not configured.", "details": []},
-            {"source": "smart_home_energy", "status": "not_configured", "imported": 0, "updated": 0,
-             "skipped": 0, "error": "Person C API is not configured.", "details": []},
-        ]}
+        backend = _CONFIG.get("backend_url", "")
+        if not backend:
+            return True, {"synced_at": _now(), "overall": "failed", "results": [
+                {"source": "subscription_tracker", "status": "not_configured", "imported": 0, "updated": 0,
+                 "skipped": 0, "error": "BACKEND_API_URL is not configured in Streamlit Secrets; "
+                                        "sync runs on the FastAPI backend.", "details": []},
+                {"source": "smart_home_energy", "status": "not_configured", "imported": 0, "updated": 0,
+                 "skipped": 0, "error": "BACKEND_API_URL is not configured in Streamlit Secrets; "
+                                        "sync runs on the FastAPI backend.", "details": []},
+            ]}
+        ok, payload = _backend_request("POST", backend, "/integrations/sync")
+        if not ok:
+            return False, payload
+        # Mirror the backend's imported expenses into Google Sheets so the UI
+        # (which reads Sheets) can show them. Idempotent on external_id.
+        mirrored, mirror_error = _mirror_integration_expenses(backend, base_url)
+        if isinstance(payload, dict):
+            payload["sheets_mirror"] = {"mirrored": mirrored, "error": mirror_error or None}
+        return True, payload
     return False, f"Unsupported POST route: {path}"
+
+
+def _mirror_integration_expenses(backend: str, apps_base: str) -> tuple[int, str]:
+    """Copy integration-imported expenses from the backend DB into Sheets.
+
+    Idempotent: rows already present in Sheets (matched by external_id) are
+    skipped, so running sync repeatedly never duplicates records. Returns
+    (mirrored_count, error) - an empty error string means success.
+    """
+    ok, payload = _backend_request("GET", backend, "/expenses",
+                                   params={"source": "integration", "limit": 200},
+                                   timeout=(10, 60))
+    if not ok:
+        return 0, f"Could not read imported expenses from the backend: {payload}"
+    rows = payload if isinstance(payload, list) else []
+    ok, existing = _visible_expenses(apps_base)
+    if not ok:
+        return 0, f"Could not read existing Sheet records: {existing}"
+    known_external = {str(row.get("external_id")) for row in existing if row.get("external_id")}
+    mirrored = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        external_id = row.get("external_id")
+        if not external_id or str(external_id) in known_external:
+            continue
+        try:
+            amount = round(float(row.get("amount", 0) or 0), 2)
+            expense_date = str(row.get("expense_date", ""))[:10]
+            date.fromisoformat(expense_date)
+        except (TypeError, ValueError):
+            continue
+        record_id = str(_next_id(existing))
+        record = {"id": int(record_id), "expense_date": expense_date,
+                  "merchant": str(row.get("merchant", "")),
+                  "description": str(row.get("description", "") or ""),
+                  "amount": amount, "category": str(row.get("category", "Uncategorized")),
+                  "source": "integration", "origin": str(row.get("origin", "integration")),
+                  "external_id": str(external_id), "import_basis": row.get("import_basis"),
+                  "created_at": str(row.get("created_at") or _now()), "_deleted": False}
+        ok, result = _save(apps_base, "expenses", record_id, record)
+        if not ok:
+            return mirrored, f"Mirror stopped early: {result}"
+        known_external.add(str(external_id))
+        existing.append(record)
+        mirrored += 1
+    return mirrored, ""
 
 
 def api_put(base_url: str, path: str, json_body: dict) -> tuple[bool, Any]:

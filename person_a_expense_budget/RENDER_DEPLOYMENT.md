@@ -8,8 +8,21 @@ backend over HTTPS.
 Status of this guide: the Blueprint was validated with
 `render blueprints validate` (result `valid: true`) and the backend was run
 locally against PostgreSQL 15 with the full test suite and the live
-end-to-end scenarios. Nothing has been deployed by the maintainers of this
-document - URLs below are placeholders until you deploy.
+end-to-end scenarios.
+
+**Live deployment status (verified 2026-11-05):** the backend is deployed at
+https://smart-expense-categorization-budget.onrender.com and `/health`
+returns `status: ok`. Two environment gaps need fixing in the Render
+Dashboard (no code change required):
+
+1. `DATABASE_URL` — `/health` currently reports `database_backend: sqlite`,
+   so the free-tier ephemeral filesystem is in use and data is wiped on every
+   redeploy. Create/provision the PostgreSQL instance from the Blueprint (or
+   manually) and set `DATABASE_URL`, then redeploy.
+2. `SUBSCRIPTION_API_URL` / `ELECTRICITY_API_URL` — `GET /integrations/status`
+   currently reports both peers as `not_configured`. Set them to
+   `https://subscription-tracker-api-ihiq.onrender.com` and
+   `https://smart-home-energy-api.onrender.com`.
 
 ## 1. Why PostgreSQL and not the SQLite file
 
@@ -76,23 +89,51 @@ curl https://<your-service>.onrender.com/health
 
 ## 3. Deploy the frontend (Streamlit Community Cloud)
 
+The Streamlit app stores expenses/budgets in **Google Apps Script + Google
+Sheets** and (optionally) talks to the Render backend for live integration
+status/sync.
+
 1. <https://share.streamlit.io> -> **Create app** -> pick the repository and branch.
 2. **Main file path**: `person_a_expense_budget/app.py`
    (Community Cloud installs `person_a_expense_budget/requirements.txt`).
 3. **Advanced settings** -> Python 3.12 -> **Secrets**:
    ```toml
-   API_BASE_URL = "https://<your-service>.onrender.com"
+   API_URL = "https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec"
+   API_SECRET = "<the same secret stored in Apps Script Script Properties>"
+   BACKEND_API_URL = "https://smart-expense-categorization-budget.onrender.com"
    ```
-   (template: `.streamlit/secrets.toml.example`). Optional:
-   `API_TIMEOUT_SECONDS = "60"` as an environment-style secret is not read -
-   the 60 s default already covers Render cold starts.
+   (template: `.streamlit/secrets.toml.example`). `API_SECRET` must equal the
+   value stored in the Apps Script project's **Script Properties** (key
+   `API_SECRET`) — see the rotation checklist below. Without `API_URL`/`API_SECRET`
+   the app falls back to `API_BASE_URL` (local backend mode), which is only
+   useful when running everything locally.
 4. Deploy and open every sidebar page. The caption under the title shows the
-   API URL in use. If the backend was asleep, the first page can take up to a
-   minute or show a "may be waking up" message - reload once.
+   storage mode. If the backend was asleep, the Integrations page can take up
+   to a couple of minutes on its first sync — retry once.
 
-The frontend never touches a database; it only calls `API_BASE_URL`.
+The UI never touches the backend database directly: records go through the
+Apps Script API, and integration status/sync/mirroring go through
+`BACKEND_API_URL` when configured.
 
-## 4. Free-tier caveats
+## 4. API secret handling and rotation (IMPORTANT)
+
+The `API_SECRET` shared between the Streamlit app and the Apps Script Web App
+was accidentally exposed in a chat in 2026-11. Treat it as compromised:
+
+1. Generate a new secret, e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+2. Apps Script: open the project -> **Project Settings -> Script Properties**
+   -> update the `API_SECRET` property to the new value -> save.
+   (No redeploy of the web app is needed for Script Property changes.)
+3. Streamlit Community Cloud: **App settings -> Secrets** -> update `API_SECRET`.
+4. Any local `.env` / `secrets.toml`: update and keep them gitignored.
+5. Never paste the secret into chat, issues, README, screenshots or code.
+   It is read at runtime from the environment / Script Properties only
+   (`ui_common.configure()`), so no code change is needed when rotating.
+6. Git-history check: all three project repositories were scanned (full
+   history) on 2026-11-05 — no real secret was ever committed; only
+   placeholders exist. No history rewrite is required, but keep it that way.
+
+## 5. Free-tier caveats
 
 - Free Render services sleep after ~15 minutes idle; the first request takes
   ~30-60 s.

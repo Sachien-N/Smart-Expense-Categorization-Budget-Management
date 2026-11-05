@@ -39,18 +39,34 @@ apps strictly over HTTP REST**:
   bounded GET-only retries, contract-key validation, and a peer outage is
   reported per-source - it never breaks A or the other source.
 - **Streamlit dashboard**: KPIs, donut chart of spend split, budget progress
-  bars, expense CRUD, budget setup, category drill-down, live integration
-  status cards + one-click sync.
+  bars, expense CRUD, budget setup, category drill-down. The Integrations page
+  shows **live peer status** and runs a one-click sync when `BACKEND_API_URL`
+  is configured; imported expenses are mirrored into Google Sheets
+  (idempotent on `external_id`).
+
+## System architecture
+
+Person A is the central expense hub of the three-app CSI3007 system. The full
+three-app communication map (including the Google Sheets data path) lives in
+[`SYSTEM_ARCHITECTURE.md`](./SYSTEM_ARCHITECTURE.md).
 
 ## Tech stack
 
 | Layer     | Technology |
 |-----------|------------|
 | Backend   | Python 3.12, FastAPI, Pydantic v2 |
-| Database  | SQLite via SQLAlchemy 2 (own file: `data/expense_budget.db`) |
-| Frontend  | Streamlit + Plotly (pure REST client - never touches the DB) |
-| Testing   | pytest + FastAPI TestClient (23 tests) |
-| Deploy    | Render (see `RENDER_DEPLOYMENT.md`) |
+| Database  | SQLite via SQLAlchemy 2 (own file: `data/expense_budget.db`); PostgreSQL on Render |
+| Frontend  | Streamlit + Plotly — stores expenses/budgets in **Google Apps Script + Google Sheets** (`API_URL` + `API_SECRET`); talks to the FastAPI backend for live integration status/sync when `BACKEND_API_URL` is set |
+| Testing   | pytest + FastAPI TestClient (**44 tests**) |
+| Deploy    | Render (backend, see `RENDER_DEPLOYMENT.md`) + Streamlit Community Cloud (frontend) |
+
+## Deployment URLs (verified 2026-11-05)
+
+| Service | URL | Status |
+|---|---|---|
+| Backend (Render) | https://smart-expense-categorization-budget.onrender.com/health | HTTP 200, `status: ok` |
+| Frontend (Streamlit Cloud) | https://smart-expense-categorization-budget-management-zeb9vcqhbfecckc.streamlit.app/ | Deployed (viewer sign-in may be required) |
+| Google Sheets data API | Apps Script Web App (`API_URL`) | Live, enforces `API_SECRET` (`{"ok":false,"error":"Unauthorized"}` without a key) |
 
 ## Quickstart
 
@@ -62,6 +78,9 @@ pip install -r requirements.txt
 
 # 2. configuration (placeholders only - edit as needed)
 cp .env.example .env
+#   Backend integration (optional locally): set SUBSCRIPTION_API_URL / ELECTRICITY_API_URL.
+#   Frontend Sheets mode: set API_URL + API_SECRET (see .streamlit/secrets.toml.example)
+#   and optionally BACKEND_API_URL for live integration status/sync.
 
 # 3. demo data (optional but recommended)
 python seed_data.py
@@ -84,7 +103,10 @@ Interactive API docs: <http://127.0.0.1:8001/docs>
 |---|---|---|
 | `DATABASE_URL` | `data/expense_budget.db` (SQLite) | Own database. Relative SQLite paths resolve against this folder; `postgres://`/`postgresql://` URLs (Render Postgres) are supported |
 | `APP_PORT` | `8001` | Backend port (Render injects `$PORT` instead) |
-| `API_BASE_URL` (frontend) | `http://127.0.0.1:8001` | Where Streamlit finds the API (env var, else Streamlit secret) |
+| `API_URL` (frontend) | - | Google Apps Script Web App `/exec` URL — the Streamlit app's data store |
+| `API_SECRET` (frontend) | - | Shared secret for the Apps Script API. **Must come from Streamlit Secrets / env — never hardcode it.** The same value must be stored in the Apps Script project's Script Properties |
+| `BACKEND_API_URL` (frontend) | - | This FastAPI backend's public URL; enables live integration status + sync + Sheets mirroring in the UI |
+| `API_BASE_URL` (frontend) | `http://127.0.0.1:8001` | Local fallback when `API_URL` is not set |
 | `API_TIMEOUT_SECONDS` (frontend) | `60` | Frontend read timeout (covers Render cold starts) |
 | `SUBSCRIPTION_API_URL` | - | Person B base URL (blank = integration off). Alias: `INTEGRATION_B_BASE_URL` |
 | `ELECTRICITY_API_URL` | - | Person C base URL (blank = integration off). Alias: `INTEGRATION_C_BASE_URL` |
@@ -170,6 +192,22 @@ person_a_expense_budget/
   `timeout`, `unauthorized`, `invalid_response` and `empty` are distinct
   statuses; a failing source never blocks the other and never returns 500.
 
+## Verified demo evidence (2026-11-05)
+
+- Backend test suite: `python -m pytest -q` -> **44 passed** (18 API + 10
+  HTTP-client/transport + 14 integration-flow + 2 migration).
+- Live end-to-end run (three real uvicorn processes, real HTTP): Person B
+  seeded with 3 subscriptions (1 inactive), Person C seeded with appliances,
+  October readings and an actual EB bill. First `POST /integrations/sync`
+  imported B: 2 (monthly-normalized; inactive skipped), C: 1 settled month;
+  second sync imported 0 (idempotent); a B price change updated the existing
+  row in place (imported=0, updated=1); killing B made sync report
+  `unavailable` for B while C still imported — no HTTP 500 anywhere.
+- Live deployed contract check: a local A instance talking to the deployed
+  Render B (`/integration/export`) and Render C (`/history?months=6`) — both
+  peers report `available` and the sync completes with 0 imports (empty
+  deployed databases).
+
 ## Known limitations & unverified items
 
 - Keyword rules are heuristic and English/Tamil-Nadu-merchant oriented; they
@@ -186,13 +224,12 @@ person_a_expense_budget/
 - Database schema changes are additive only (`import_basis` column added on
   startup via `ALTER TABLE ... ADD COLUMN`); there is no Alembic history.
 
-## Git quickstart (GitHub-ready)
+## Git workflow (this repository)
 
 ```bash
-git init
-git add .
-git commit -m "CSI3007 Person A: expense & budget manager"
-git branch -M main
-git remote add origin https://github.com/<your-user>/csi3007-expense-budget-manager.git
-git push -u origin main
+git clone https://github.com/Sachien-N/Smart-Expense-Categorization-Budget-Management.git
+cd Smart-Expense-Categorization-Budget-Management
+git checkout -b <feature-branch>
+# ... changes ...
+git add . && git commit -m "..." && git push origin <feature-branch>
 ```
