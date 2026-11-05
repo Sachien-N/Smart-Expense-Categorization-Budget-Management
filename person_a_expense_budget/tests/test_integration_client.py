@@ -42,6 +42,23 @@ class StubHandler(BaseHTTPRequestHandler):
                 self._send(502, "bad gateway", "text/plain")
             else:
                 self._send(200, json.dumps({"service": "x", "subscriptions": []}))
+        elif self.path == "/rate-limited-once":
+            if CALLS[self.path] == 1:
+                self.send_response(429)
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+            else:
+                self._send(200, json.dumps({"service": "x", "subscriptions": []}))
+        elif self.path == "/rate-limited-always":
+            self.send_response(429)
+            self.send_header("Retry-After", "3600")  # hostile value: must be capped
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
         elif self.path == "/secret":
             self._send(401, json.dumps({"detail": "no"}))
         elif self.path == "/html":
@@ -53,6 +70,14 @@ class StubHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         CALLS["POST" + self.path] = CALLS.get("POST" + self.path, 0) + 1
+        if self.path == "/rate-limited-always":
+            self.send_response(429)
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
         self._send(503, "{}")
 
 
@@ -110,6 +135,43 @@ def test_401_is_unauthorized_and_not_retried(stub):
     CALLS.pop("/secret", None)
     _, _, kind = fetch_json("GET", f"{stub}/secret", timeout=2, max_retries=2, backoff_seconds=0)
     assert kind == "unauthorized" and CALLS["/secret"] == 1
+
+
+def test_429_is_retried_and_recovers(stub):
+    CALLS.pop("/rate-limited-once", None)
+    payload, error, kind = fetch_json("GET", f"{stub}/rate-limited-once", timeout=2, max_retries=2, backoff_seconds=0)
+    assert kind == "ok" and payload["service"] == "x" and error is None
+    assert CALLS["/rate-limited-once"] == 2
+
+
+def test_persistent_429_is_rate_limited_after_bounded_retries(stub):
+    CALLS.pop("/rate-limited-always", None)
+    _, error, kind = fetch_json("GET", f"{stub}/rate-limited-always", timeout=2, max_retries=1, backoff_seconds=0)
+    assert kind == "rate_limited" and "429" in error
+    assert CALLS["/rate-limited-always"] == 2  # bounded: never an infinite retry
+
+
+def test_retry_after_is_capped(stub, monkeypatch):
+    import services.integration_client as client_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_module.time, "sleep", lambda s: sleeps.append(s))
+    CALLS.pop("/rate-limited-always", None)
+    _, error, kind = fetch_json("GET", f"{stub}/rate-limited-always", timeout=2, max_retries=1, backoff_seconds=0)
+    assert kind == "rate_limited"
+    assert sleeps and max(sleeps) <= client_module.MAX_RATE_LIMIT_WAIT_SECONDS
+
+
+def test_429_on_post_is_classified_but_never_retried(stub, monkeypatch):
+    import services.integration_client as client_module
+
+    monkeypatch.setattr(client_module.time, "sleep", lambda s: None)
+    CALLS.pop("POST/rate-limited-always", None)
+    _, error, kind = fetch_json(
+        "POST", f"{stub}/rate-limited-always", timeout=2, max_retries=3, backoff_seconds=0, json_body={}
+    )
+    assert kind == "rate_limited" and "429" in error
+    assert CALLS["POST/rate-limited-always"] == 1
 
 
 def test_404_is_invalid_response(stub):

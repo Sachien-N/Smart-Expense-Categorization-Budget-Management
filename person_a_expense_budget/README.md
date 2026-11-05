@@ -57,7 +57,7 @@ three-app communication map (including the Google Sheets data path) lives in
 | Backend   | Python 3.12, FastAPI, Pydantic v2 |
 | Database  | SQLite via SQLAlchemy 2 (own file: `data/expense_budget.db`); PostgreSQL on Render |
 | Frontend  | Streamlit + Plotly — stores expenses/budgets in **Google Apps Script + Google Sheets** (`API_URL` + `API_SECRET`); talks to the FastAPI backend for live integration status/sync when `BACKEND_API_URL` is set |
-| Testing   | pytest + FastAPI TestClient (**44 tests**) |
+| Testing   | pytest + FastAPI TestClient (**48 tests**) |
 | Deploy    | Render (backend, see `RENDER_DEPLOYMENT.md`) + Streamlit Community Cloud (frontend) |
 
 ## Deployment URLs (verified 2026-11-05)
@@ -189,13 +189,18 @@ person_a_expense_budget/
   not live summaries. Deleting an imported row in A and syncing again
   re-imports it.
 - Failure semantics: `not_configured`, `misconfigured`, `unavailable`,
-  `timeout`, `unauthorized`, `invalid_response` and `empty` are distinct
-  statuses; a failing source never blocks the other and never returns 500.
+  `timeout`, `unauthorized`, `rate_limited`, `invalid_response` and `empty`
+  are distinct statuses; a failing source never blocks the other and never
+  returns 500. HTTP 429 from a peer (cloud-host throttling of bursts/cold
+  starts) is classified as `rate_limited` and retried within a bounded
+  budget (max 2 retries, Retry-After honoured up to a 10 s cap) - never an
+  infinite retry.
 
 ## Verified demo evidence (2026-11-05)
 
-- Backend test suite: `python -m pytest -q` -> **44 passed** (18 API + 10
-  HTTP-client/transport + 14 integration-flow + 2 migration).
+- Backend test suite: `python -m pytest -q` -> **48 passed** (18 API + 14
+  HTTP-client/transport incl. 429 retry/backoff + 14 integration-flow + 2
+  migration).
 - Live end-to-end run (three real uvicorn processes, real HTTP): Person B
   seeded with 3 subscriptions (1 inactive), Person C seeded with appliances,
   October readings and an actual EB bill. First `POST /integrations/sync`

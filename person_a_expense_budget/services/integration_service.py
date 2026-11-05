@@ -40,7 +40,15 @@ from services.integration_client import fetch_json
 B_EXPORT_KEYS = ("service", "subscriptions")
 C_HISTORY_KEYS = ("months",)
 SUPPORTED_CURRENCY = "INR"
-FAILURE_STATUSES = {"not_configured", "misconfigured", "unavailable", "timeout", "unauthorized", "invalid_response"}
+FAILURE_STATUSES = {
+    "not_configured",
+    "misconfigured",
+    "unavailable",
+    "timeout",
+    "unauthorized",
+    "rate_limited",
+    "invalid_response",
+}
 MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 ELECTRICITY_KEYWORDS = ("electric", "tneb", "tangedco", "eb bill", "power bill")
 

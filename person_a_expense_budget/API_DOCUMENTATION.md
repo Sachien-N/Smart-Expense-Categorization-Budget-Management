@@ -174,9 +174,11 @@ Live probe of both peers (short timeout, no retries):
 }
 ```
 
-`status` ∈ `available | unavailable | timeout | unauthorized | invalid_response | not_configured | misconfigured`
+`status` ∈ `available | unavailable | timeout | unauthorized | rate_limited | invalid_response | not_configured | misconfigured`
 (`not_configured` when the env var is blank - integration intentionally off;
-`misconfigured` when the URL lacks `http://` / `https://`).
+`misconfigured` when the URL lacks `http://` / `https://`; `rate_limited` when
+the peer answered HTTP 429 - retried within a bounded budget, Retry-After
+honoured up to a 10 s cap, then reported as `rate_limited`, never a 500).
 
 ### `POST /integrations/sync`
 Pulls both peers and imports idempotently. **Partial failure never blocks the
@@ -211,7 +213,7 @@ other source and never returns 500.**
   `upgraded_estimate_to_actual`, `skipped_inactive`, `skipped_invalid_payload`,
   `skipped_malformed_entry`, `skipped_unsupported_currency`,
   `skipped_manual_duplicate`.
-- `status` per source ∈ `ok | empty | not_configured | misconfigured | unavailable | timeout | unauthorized | invalid_response`;
+- `status` per source ∈ `ok | empty | not_configured | misconfigured | unavailable | timeout | unauthorized | rate_limited | invalid_response`;
   `overall` ∈ `ok | partial | failed`.
 - Idempotency: re-running yields `already_imported` and identical totals
   (UNIQUE index on `expenses.external_id`) - verified live (SQLite and

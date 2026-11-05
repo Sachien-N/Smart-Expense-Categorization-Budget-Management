@@ -141,3 +141,18 @@ was accidentally exposed in a chat in 2026-11. Treat it as compromised:
   frontends call the APIs server-side). Restrict it for real use.
 - Unhandled errors return `{"detail": "Internal server error"}`; tracebacks
   go to the Render logs only.
+- **HTTP 429 on free instances**: Render's edge can throttle bursts of
+  requests to a waking free instance with `429 Too Many Requests`. This is
+  infrastructure-level - no rate limiter exists in this codebase. Person A's
+  integration client classifies it as `rate_limited`, honours `Retry-After`
+  (capped at 10 s) and retries within a bounded budget (max 2), so a sync
+  recovers automatically. Before a demo, warm every service once:
+
+  ```bash
+  curl -s https://subscription-tracker-api-ihiq.onrender.com/health
+  curl -s https://smart-home-energy-api.onrender.com/health
+  curl -s https://smart-expense-categorization-budget.onrender.com/health
+  ```
+
+  then open Person A's Integrations page and press **Check status** before
+  **Sync now** - this wakes the peers without racing the sync.

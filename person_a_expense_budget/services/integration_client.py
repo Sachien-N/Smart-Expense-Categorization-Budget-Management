@@ -4,10 +4,15 @@ Contract-first design rules (enforced here so every caller benefits):
 - one pooled requests.Session (connection reuse across calls);
 - explicit (connect, read) timeouts on every request;
 - bounded retries with linear backoff ONLY for idempotent methods (GET/HEAD)
-  and only on connection errors, timeouts and HTTP 5xx - never on 4xx;
+  and only on connection errors, timeouts, HTTP 5xx and HTTP 429 - never on
+  other 4xx;
+- HTTP 429 is reported as its own kind ("rate_limited"), honours the peer's
+  Retry-After header (capped so a hostile/misbehaving peer cannot stall the
+  sync) and is retried with the same bounded budget - never an infinite retry;
 - this layer NEVER raises past its return boundary: it returns a
   (payload, error, kind) tuple where kind is one of
-  "ok" | "unavailable" | "timeout" | "unauthorized" | "invalid_response";
+  "ok" | "unavailable" | "timeout" | "unauthorized" | "rate_limited" |
+  "invalid_response";
 - responses are validated against the keys of the documented contract so
   a wrong/foreign service is reported as invalid_response instead of
   crashing the expense app;
@@ -23,6 +28,10 @@ import requests
 logger = logging.getLogger("expense_budget.integration")
 
 RETRYABLE_METHODS = {"GET", "HEAD"}
+# A peer behind aggressive rate limiting may send Retry-After: 3600. Waiting
+# that long inside a sync request would block the caller; cap the wait and
+# surface the remaining information in the error/kind instead.
+MAX_RATE_LIMIT_WAIT_SECONDS = 10.0
 
 _session: Optional[requests.Session] = None
 
@@ -66,6 +75,7 @@ def fetch_json(
 
     for attempt in range(attempts):
         started = time.perf_counter()
+        retry_after_seconds: Optional[float] = None
         try:
             response = get_session().request(method, url, json=json_body, params=params, timeout=timeouts)
         except requests.Timeout:
@@ -77,7 +87,13 @@ def fetch_json(
         else:
             elapsed_ms = (time.perf_counter() - started) * 1000
             logger.info("%s %s -> HTTP %s in %.0f ms", method, target, response.status_code, elapsed_ms)
-            if response.status_code >= 500:
+            if response.status_code == 429:
+                # Cloud hosts (e.g. Render free instances) throttle bursts and
+                # cold-start wake-ups. This is transient, not a broken contract:
+                # classify it separately and retry within the bounded budget.
+                last_error, last_kind = f"rate_limited: {target} returned HTTP 429", "rate_limited"
+                retry_after_seconds = _retry_after_seconds(response)
+            elif response.status_code >= 500:
                 last_error, last_kind = f"unavailable: {target} returned HTTP {response.status_code}", "unavailable"
             elif response.status_code in (401, 403):
                 return None, f"unauthorized: {target} returned HTTP {response.status_code}", "unauthorized"
@@ -98,9 +114,26 @@ def fetch_json(
 
         logger.warning("%s %s failed (attempt %d/%d): %s", method, target, attempt + 1, attempts, last_error)
         if attempt < attempts - 1:
-            time.sleep(backoff_seconds * (attempt + 1))
+            if retry_after_seconds is not None:
+                time.sleep(retry_after_seconds)
+            else:
+                time.sleep(backoff_seconds * (attempt + 1))
 
     return None, last_error, last_kind
+
+
+def _retry_after_seconds(response: requests.Response) -> Optional[float]:
+    """Retry-After header, parsed and capped; None when absent/unparseable."""
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        value = float(raw.strip())
+    except (AttributeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return min(value, MAX_RATE_LIMIT_WAIT_SECONDS)
 
 
 def check_service_health(
